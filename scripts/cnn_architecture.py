@@ -1,15 +1,14 @@
 """
 Utility module for building Convolutional Neural Network (CNN) architectures used in the project.
 
-The helpers below expose three ready-to-train networks:
+The helpers below expose ready-to-train networks:
     - baseline_cnn: small and efficient 3-layer CNN suitable for quick training
-    - deep_feature_cnn: deeper and wider CNN for richer feature extraction
     - compact_batchnorm_cnn: batchnorm-heavy design for stable training on small/medium datasets
+    - pretrained_resnet: wrapper around torchvision ResNet backbones for transfer learning
 """
-
 import torch
 from torch import nn
-
+from torchvision import models
 
 class BaselineCNN(nn.Module):
     """
@@ -45,8 +44,12 @@ class BaselineCNN(nn.Module):
             nn.MaxPool2d(2),
         )
 
+        # global average pooling layer due to overfitting
+        self.gap = nn.AdaptiveAvgPool2d((1, 1))
+
+        # classifier layer
         self.classifier = nn.Sequential(
-            nn.Linear(128 * 31 * 31, 256),
+            nn.Linear(128, 256),
             nn.ReLU(),
             nn.Dropout(0.6),
             nn.Linear(256, 1),
@@ -55,63 +58,8 @@ class BaselineCNN(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.features(x)
-        x = x.view(x.size(0), -1)
-        x = self.classifier(x)
-        return x
-
-
-class DeepFeatureCNN(nn.Module):
-    """
-    Deep feature CNN architecture.
-
-    Motivation:
-        - Adds more convolutional layers and larger channel widths.
-        - Extracts more complex patterns (edges → shapes → textures).
-        - Performs well on larger or more varied datasets.
-        - Includes dropout for regularization.
-
-    Structure:
-        Conv(3→64) → Conv → MaxPool
-        Conv(64→128) → Conv → MaxPool
-        Conv(128→256) → Conv → MaxPool
-        Fully connected with dropout
-    """
-
-    def __init__(self, num_classes: int = 2):
-        super().__init__()
-
-        self.features = nn.Sequential(
-            nn.Conv2d(3, 64, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(64, 64, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-
-            nn.Conv2d(64, 128, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(128, 128, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-
-            nn.Conv2d(128, 256, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(256, 256, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-            nn.MaxPool2d(2),
-        )
-
-        self.classifier = nn.Sequential(
-            nn.Linear(256 * 31 * 31, 256),  # 246,016
-            nn.ReLU(),
-            nn.Dropout(0.5),
-            nn.Linear(256, 1),
-            nn.Sigmoid()
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.features(x)
-        x = x.view(x.size(0), -1)
+        x = self.gap(x)  # shape: (batch, 128, 1, 1)
+        x = x.view(x.size(0), -1)  # flatten to (batch, 128)
         x = self.classifier(x)
         return x
 
@@ -150,10 +98,11 @@ class CompactBatchnormCNN(nn.Module):
             nn.BatchNorm2d(128),
             nn.ReLU(),
             nn.MaxPool2d(2),
+            nn.MaxPool2d(2),
         )
 
         self.classifier = nn.Sequential(
-            nn.Linear(128 * 62 * 62, 256),
+            nn.Linear(128 * 31 * 31, 256),
             nn.BatchNorm1d(256),
             nn.ReLU(),
             nn.Dropout(0.3),
@@ -166,6 +115,67 @@ class CompactBatchnormCNN(nn.Module):
         x = x.view(x.size(0), -1)
         x = self.classifier(x)
         return x
+
+
+class PretrainedResNet(nn.Module):
+    """
+    Wrapper around torchvision's ResNet family with a binary classification head.
+
+    Args:
+        model_name: Which ResNet variant to load (resnet18/resnet34/resnet50).
+        pretrained: If True, load ImageNet weights before replacing final layer.
+        train_backbone: If False, keep backbone frozen and only train new head.
+        dropout: Dropout applied before the new classification layer.
+    """
+
+    _MODEL_FACTORIES = {
+        "resnet18": (models.resnet18, "ResNet18_Weights"),
+        "resnet34": (models.resnet34, "ResNet34_Weights"),
+        "resnet50": (models.resnet50, "ResNet50_Weights"),
+    }
+
+    def __init__(
+        self,
+        model_name: str = "resnet18",
+        pretrained: bool = True,
+        train_backbone: bool = False,
+        dropout: float = 0.3,
+    ):
+        super().__init__()
+
+        model_name = model_name.lower()
+        if model_name not in self._MODEL_FACTORIES:
+            available = ", ".join(sorted(self._MODEL_FACTORIES))
+            raise ValueError(f"Unsupported ResNet '{model_name}'. Choose from: {available}")
+
+        factory, weight_attr = self._MODEL_FACTORIES[model_name]
+        weights_cls = getattr(models, weight_attr, None)
+        kwargs = {}
+        if weights_cls is not None:
+            kwargs["weights"] = weights_cls.DEFAULT if pretrained else None
+        else:
+            # Fallback to legacy torchvision versions.
+            kwargs["pretrained"] = pretrained
+
+        backbone = factory(**kwargs)
+        if not train_backbone:
+            for param in backbone.parameters():
+                param.requires_grad = False
+
+        in_features = backbone.fc.in_features
+        backbone.fc = nn.Sequential(
+            nn.Dropout(dropout),
+            nn.Linear(in_features, 1),
+            nn.Sigmoid(),
+        )
+
+        for param in backbone.fc.parameters():
+            param.requires_grad = True
+
+        self.model = backbone
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.model(x)
 
 
 def train(model, num_epochs, train_dl, valid_dl, optimizer, device, loss_fn):

@@ -51,7 +51,7 @@ def main_preprocess():
 
     train_loader = DataLoader(
         train_dataset,
-        batch_size=6,
+        batch_size=14,
         shuffle=True,
         num_workers=4,
         pin_memory=True
@@ -59,7 +59,7 @@ def main_preprocess():
 
     test_loader = DataLoader(
         test_dataset,
-        batch_size=6,
+        batch_size=12,
         shuffle=False,
         num_workers=4,
         pin_memory=True
